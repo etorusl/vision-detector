@@ -36,7 +36,15 @@ LABELING_PROMPT = (
     "Output a JSON array of hallucinated phrases. Each entry: "
     '{"phrase": "exact quoted substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
     "Quote the phrase EXACTLY as it appears in the answer (copy-paste characters). "
-    "If no hallucinations, output [].\n"
+    "If no hallucinations, output [].\n\n"
+    "Example 1 (no hallucination):\n"
+    'Image: a bright red apple. Question: "What color is this apple?" '
+    'Answer: "The apple is red." → Output: []\n\n'
+    "Example 2 (hallucination):\n"
+    'Image: a cat with three legs. Question: "Does this cat have four legs?" '
+    'Answer: "Yes, this cat has four legs." '
+    '→ Output: [{"phrase": "four legs", "label": "miscounting"}]\n\n'
+    "Now analyze the image below:\n"
     "Output ONLY the JSON array, nothing else."
 )
 
@@ -50,6 +58,7 @@ def load_model_and_processor(model_id):
         attn_implementation="sdpa",
         trust_remote_code=True,
     )
+    print(f"[MODEL] {model_id}  config.model_type={model.config.model_type}", flush=True)
     return model, processor
 
 
