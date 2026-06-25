@@ -201,6 +201,8 @@ def main():
                         help="Describe first N images to verify vision works, then exit")
     parser.add_argument("--temperature", type=float, default=0.5,
                         help="Generation temperature (default: 0.5)")
+    parser.add_argument("--no_fewshot", action="store_true",
+                        help="Disable few-shot, single image only")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
@@ -208,8 +210,12 @@ def main():
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    fewshot_data = load_fewshot_data(args.input, args.image_dir)
-    print(f"Loaded {len(fewshot_data)} few-shot examples", flush=True)
+    if args.no_fewshot:
+        fewshot_data = []
+        print("Few-shot disabled", flush=True)
+    else:
+        fewshot_data = load_fewshot_data(args.input, args.image_dir)
+        print(f"Loaded {len(fewshot_data)} few-shot examples", flush=True)
 
     if args.debug_images > 0:
         print(f"\n=== VISION DEBUG: describing first {args.debug_images} images ===\n", flush=True)
@@ -235,7 +241,7 @@ def main():
         lines = lines[: args.max_samples]
 
     results = []
-    fewshot_ids = set(FEWSHOT_IDS)
+    fewshot_ids = set(FEWSHOT_IDS) if not args.no_fewshot else set()
     debug_count = 0
     iou_total = 0.0
     iou_count = 0
@@ -271,7 +277,7 @@ def main():
             item["prompt"], item["response"],
             temperature=args.temperature,
             debug=debug,
-            fewshot_data=fewshot_data,
+            fewshot_data=fewshot_data or None,
         )
         debug_count += 1
         parsed = parse_output(raw)
