@@ -36,14 +36,11 @@ LABELING_PROMPT = (
     "Output a JSON array of hallucinated phrases found in the answer. "
     'Each entry: {"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
     "Quote the phrase EXACTLY as it appears — copy-paste characters. "
-    "If the answer is fully correct, output [].\n\n"
-    "Format example:\n"
-    'Answer: "The cat has four legs and is orange."\n'
-    'If the cat in the image has only three legs and is gray, output:\n'
-    '[{"phrase": "four legs", "label": "miscounting"}, {"phrase": "orange", "label": "mischaracterization"}]\n\n'
-    "Now analyze the real image and answer below.\n"
+    "If the answer is fully correct, output [].\n"
     "Output ONLY the JSON array, nothing else."
 )
+
+FEWSHOT_IDS = ["train-en-412", "train-en-415"]
 
 
 def load_model_and_processor(model_id):
@@ -59,8 +56,34 @@ def load_model_and_processor(model_id):
     return model, processor
 
 
+def load_fewshot_data(data_path, image_dir):
+    with open(data_path, "r", encoding="utf-8") as f:
+        all_items = {item["id"]: item for line in f
+                     if (item := json.loads(line.strip()))["id"] in FEWSHOT_IDS}
+    fewshot = []
+    for fid in FEWSHOT_IDS:
+        item = all_items[fid]
+        img_path = os.path.join(image_dir, item["image_name"])
+        if not os.path.exists(img_path):
+            print(f"WARNING: few-shot image not found: {img_path}", flush=True)
+            continue
+        img = Image.open(img_path).convert("RGB")
+        rtext = item["response"]
+        phrases = []
+        for lb in item.get("labels", []):
+            phrase = rtext[lb["start"]:lb["end"]]
+            phrases.append({"phrase": phrase, "label": lb["label"]})
+        fewshot.append({
+            "image": img,
+            "prompt": item["prompt"],
+            "response": rtext,
+            "output": phrases,
+        })
+    return fewshot
+
+
 def label_sample(model, processor, image_path, prompt, response, temperature=0.5,
-                 debug=False, image_only=False):
+                 debug=False, image_only=False, fewshot_data=None):
     image = Image.open(image_path).convert("RGB")
 
     if image_only:
@@ -68,19 +91,36 @@ def label_sample(model, processor, image_path, prompt, response, temperature=0.5
             {"type": "image"},
             {"type": "text", "text": "Describe what you see in this image in 2-3 sentences. Be specific."},
         ]
+        all_images = [image]
     else:
-        user_content = [
-            {"type": "image"},
-            {
-                "type": "text",
-                "text": (
-                    f"{LABELING_PROMPT}\n\n"
-                    f'Question: "{prompt}"\n'
-                    f'Answer: "{response}"\n'
-                    "Output:"
-                ),
-            },
-        ]
+        user_content = []
+        all_images = []
+
+        if fewshot_data:
+            for i, fs in enumerate(fewshot_data, 1):
+                user_content.append({"type": "image"})
+                user_content.append({
+                    "type": "text",
+                    "text": (
+                        f"Example {i}:\n"
+                        f'Question: "{fs["prompt"]}"\n'
+                        f'Answer: "{fs["response"]}"\n'
+                        f'Output: {json.dumps(fs["output"])}\n'
+                    ),
+                })
+                all_images.append(fs["image"])
+
+        user_content.append({"type": "image"})
+        user_content.append({
+            "type": "text",
+            "text": (
+                f"{LABELING_PROMPT}\n\n"
+                f'Question: "{prompt}"\n'
+                f'Answer: "{response}"\n'
+                "Output:"
+            ),
+        })
+        all_images.append(image)
 
     messages = [{"role": "user", "content": user_content}]
 
@@ -88,10 +128,18 @@ def label_sample(model, processor, image_path, prompt, response, temperature=0.5
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = processor(
-        text=template_text, images=image, return_tensors="pt"
+        text=template_text, images=all_images, return_tensors="pt"
     ).to(model.device)
 
     prompt_tokens = inputs.input_ids.shape[-1]
+
+    if debug:
+        img_keys = [k for k in inputs.keys() if "pixel" in k.lower() or "image" in k.lower() or "img" in k.lower()]
+        pixel_shapes = {k: tuple(inputs[k].shape) for k in img_keys}
+        has_imgs = "<image>" in template_text.lower()
+        print(f"[DEBUG] prompt={prompt_tokens}, gen=?, images={len(all_images)}, "
+              f"pixel_tensors={pixel_shapes}, template_has_<image>={has_imgs}",
+              flush=True)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -105,7 +153,11 @@ def label_sample(model, processor, image_path, prompt, response, temperature=0.5
     gen_tokens = outputs.shape[-1] - prompt_tokens
 
     if debug:
-        print(f"[DEBUG] prompt={prompt_tokens}, chars={len(template_text)}, gen={gen_tokens}",
+        img_keys = [k for k in inputs.keys() if "pixel" in k.lower() or "image" in k.lower() or "img" in k.lower()]
+        pixel_shapes = {k: tuple(inputs[k].shape) for k in img_keys}
+        has_img_token = "<image>" in template_text
+        print(f"[DEBUG] prompt={prompt_tokens}, gen={gen_tokens}, imgs={len(all_images)}, "
+              f"pixels={pixel_shapes}, has_<image>={has_img_token}",
               flush=True)
 
     generated_tokens = outputs[0][prompt_tokens:]
@@ -161,6 +213,9 @@ def main():
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
+    fewshot_data = load_fewshot_data(args.input, args.image_dir)
+    print(f"Loaded {len(fewshot_data)} few-shot examples", flush=True)
+
     if args.debug_images > 0:
         print(f"\n=== VISION DEBUG: describing first {args.debug_images} images ===\n", flush=True)
         for i in range(min(args.debug_images, len(lines))):
@@ -185,6 +240,7 @@ def main():
         lines = lines[: args.max_samples]
 
     results = []
+    fewshot_ids = set(FEWSHOT_IDS)
     debug_count = 0
     iou_total = 0.0
     iou_count = 0
@@ -194,6 +250,9 @@ def main():
 
     for idx, line in enumerate(tqdm(lines, desc="Labeling")):
         item = json.loads(line.strip())
+
+        if item["id"] in fewshot_ids:
+            continue
 
         raw_path = os.path.join(args.image_dir, item["image_name"])
         image_path = os.path.realpath(raw_path)
@@ -217,6 +276,7 @@ def main():
             item["prompt"], item["response"],
             temperature=args.temperature,
             debug=debug,
+            fewshot_data=fewshot_data,
         )
         debug_count += 1
         parsed = parse_output(raw)
