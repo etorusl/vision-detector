@@ -137,7 +137,7 @@ def main():
 
     print()
     print("--- IoU distribution ---")
-    buckets = [(0.0, 0.0), (0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (1.0, 1.0)]
+    buckets = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (1.0, 1.0)]
     for lo, hi in buckets:
         if lo == hi:
             count = sum(1 for iou in ious if iou == lo)
@@ -147,8 +147,6 @@ def main():
         bar = "#" * int(pct / 2)
         if lo == 1.0 and hi == 1.0:
             print(f"  IoU = 1.0:    {count:5d} ({pct:5.1f}%) {bar}")
-        elif lo == 0.0 and hi == 0.0:
-            print(f"  IoU = 0.0:    {count:5d} ({pct:5.1f}%) {bar}")
         else:
             print(f"  IoU [{lo:.1f}, {hi:.1f}): {count:5d} ({pct:5.1f}%) {bar}")
 

@@ -141,7 +141,15 @@ def main():
         if item["id"] in exclude_ids:
             continue
 
-        image_path = os.path.join(args.image_dir, item["image_name"])
+        raw_path = os.path.join(args.image_dir, item["image_name"])
+        image_path = os.path.realpath(raw_path)
+        image_dir_real = os.path.realpath(args.image_dir) + os.sep
+
+        if not image_path.startswith(image_dir_real):
+            item["pred_labels"] = None
+            item["error"] = f"Path traversal rejected: {item['image_name']}"
+            results.append(item)
+            continue
 
         if not os.path.exists(image_path):
             item["pred_labels"] = None
