@@ -78,7 +78,7 @@ def load_model_and_processor(model_id):
         model_id,
         device_map="auto",
         dtype=torch.bfloat16,
-        attn_implementation="eager",
+        attn_implementation="sdpa",
         trust_remote_code=True,
     )
     print(f"[MODEL] {model_id}  config.model_type={model.config.model_type}", flush=True)
@@ -104,7 +104,8 @@ def label_one(model, processor, image_path, prompt, response, temperature, debug
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = processor(
-        text=template, images=image, return_tensors="pt"
+        text=template, images=image, return_tensors="pt",
+        max_pixels=512 * 512,
     ).to(model.device)
 
     prompt_tokens = inputs.input_ids.shape[-1]
