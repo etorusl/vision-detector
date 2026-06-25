@@ -96,7 +96,7 @@ def label_sample(model, processor, image_path, prompt, response, fewshot_prompt)
         outputs = model.generate(
             **inputs,
             max_new_tokens=1024,
-            temperature=0.8,
+            temperature=1.0,
             top_p=0.95,
             top_k=64,
         )
@@ -104,23 +104,7 @@ def label_sample(model, processor, image_path, prompt, response, fewshot_prompt)
     gen_tokens = outputs.shape[-1] - prompt_tokens
     print(f"[DEBUG] generated tokens: {gen_tokens}", flush=True)
 
-    if gen_tokens == 0:
-        print("[DEBUG] zero tokens — trying direct processor chat mode", flush=True)
-        inputs2 = processor(
-            images=image,
-            text=messages,
-            return_tensors="pt",
-            add_generation_prompt=True,
-        ).to(model.device)
-        pm2 = inputs2.input_ids.shape[-1]
-        with torch.no_grad():
-            outputs2 = model.generate(**inputs2, max_new_tokens=1024, temperature=0.8, top_p=0.95, top_k=64)
-        gen2 = outputs2.shape[-1] - pm2
-        print(f"[DEBUG] fallback: prompt={pm2}, generated={gen2}", flush=True)
-        generated_tokens = outputs2[0][pm2:]
-    else:
-        generated_tokens = outputs[0][prompt_tokens:]
-
+    generated_tokens = outputs[0][prompt_tokens:]
     raw_output = processor.decode(generated_tokens, skip_special_tokens=True).strip()
     return raw_output
 
