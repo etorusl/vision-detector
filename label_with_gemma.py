@@ -30,21 +30,18 @@ def char_iou(gold_spans, pred_spans, response_len):
 
 
 LABELING_PROMPT = (
-    "Look at the image. A user asked a question about it and a model produced an answer. "
+    "Look at the image. A user asked a question about it and a model produced the answer below. "
     "Your task: check if the answer contains hallucinations (factual errors, miscounting, "
     "or invented details inconsistent with what's visible in the image).\n\n"
-    "Output a JSON array of hallucinated phrases. Each entry: "
-    '{"phrase": "exact quoted substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
-    "Quote the phrase EXACTLY as it appears in the answer (copy-paste characters). "
-    "If no hallucinations, output [].\n\n"
-    "Example 1 (no hallucination):\n"
-    'Image: a bright red apple. Question: "What color is this apple?" '
-    'Answer: "The apple is red." → Output: []\n\n'
-    "Example 2 (hallucination):\n"
-    'Image: a cat with three legs. Question: "Does this cat have four legs?" '
-    'Answer: "Yes, this cat has four legs." '
-    '→ Output: [{"phrase": "four legs", "label": "miscounting"}]\n\n'
-    "Now analyze the image below:\n"
+    "Output a JSON array of hallucinated phrases found in the answer. "
+    'Each entry: {"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
+    "Quote the phrase EXACTLY as it appears — copy-paste characters. "
+    "If the answer is fully correct, output [].\n\n"
+    "Format example:\n"
+    'Answer: "The cat has four legs and is orange."\n'
+    'If the cat in the image has only three legs and is gray, output:\n'
+    '[{"phrase": "four legs", "label": "miscounting"}, {"phrase": "orange", "label": "mischaracterization"}]\n\n'
+    "Now analyze the real image and answer below.\n"
     "Output ONLY the JSON array, nothing else."
 )
 
