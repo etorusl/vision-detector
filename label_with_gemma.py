@@ -40,6 +40,23 @@ LABELING_PROMPT = (
     "Output ONLY the JSON array, nothing else."
 )
 
+DESCRIBE_PROMPT = (
+    "Describe this image in detail. Be specific about objects, colors, counts, "
+    "positions, textures, text, and any unusual features. "
+    "Write 3-5 sentences covering everything visible that might be relevant "
+    "to answering questions about this image."
+)
+
+TEXT_LABELING_PROMPT = (
+    "Below is a detailed description of an image, a question someone asked about it, "
+    "and an answer a model gave. Your task: check if the answer contains hallucinations "
+    "(factual errors, miscounting, or invented details) that contradict the image description.\n\n"
+    "Output a JSON array of hallucinated phrases from the ANSWER. "
+    'Each entry: {{"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}}. '
+    "Quote the phrase EXACTLY. If the answer is fully correct, output [].\n"
+    "Output ONLY the JSON array, nothing else."
+)
+
 FEWSHOT_IDS = ["train-en-412", "train-en-415"]
 
 
@@ -80,6 +97,63 @@ def load_fewshot_data(data_path, image_dir):
             "output": phrases,
         })
     return fewshot
+
+
+def describe_image(model, processor, image_path):
+    image = Image.open(image_path).convert("RGB")
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text", "text": DESCRIBE_PROMPT},
+        ]
+    }]
+    return _generate(model, processor, messages, [image], debug=False)
+
+
+def label_from_description(model, processor, description, question, answer,
+                           temperature=0.5, debug=False):
+    text_content = (
+        f'{TEXT_LABELING_PROMPT}\n\n'
+        f'Image description: """{description}"""\n\n'
+        f'Question: "{question}"\n'
+        f'Answer: "{answer}"\n'
+        f'Output:'
+    )
+    messages = [{"role": "user", "content": text_content}]
+    return _generate(model, processor, messages, [], temperature=temperature, debug=debug)
+
+
+def _generate(model, processor, messages, images, temperature=0.5, debug=False):
+    template_text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    if images:
+        inputs = processor(
+            text=template_text, images=images, return_tensors="pt"
+        ).to(model.device)
+    else:
+        inputs = processor(
+            text=template_text, return_tensors="pt"
+        ).to(model.device)
+
+    prompt_tokens = inputs.input_ids.shape[-1]
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=temperature,
+            top_p=0.95,
+            top_k=64,
+        )
+
+    gen_tokens = outputs.shape[-1] - prompt_tokens
+    if debug:
+        print(f"[DEBUG] prompt={prompt_tokens}, gen={gen_tokens}", flush=True)
+
+    generated_tokens = outputs[0][prompt_tokens:]
+    return processor.decode(generated_tokens, skip_special_tokens=True).strip()
 
 
 def label_sample(model, processor, image_path, prompt, response, temperature=0.5,
@@ -203,6 +277,8 @@ def main():
                         help="Generation temperature (default: 0.5)")
     parser.add_argument("--no_fewshot", action="store_true",
                         help="Disable few-shot, single image only")
+    parser.add_argument("--two_stage", action="store_true",
+                        help="Two-stage: describe image first, then text-only labeling")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
@@ -272,13 +348,24 @@ def main():
             continue
 
         debug = debug_count < 3
-        raw = label_sample(
-            model, processor, image_path,
-            item["prompt"], item["response"],
-            temperature=args.temperature,
-            debug=debug,
-            fewshot_data=fewshot_data or None,
-        )
+        if args.two_stage:
+            description = describe_image(model, processor, image_path)
+            if debug:
+                print(f"[DESC] {description[:200]}...", flush=True)
+            raw = label_from_description(
+                model, processor, description,
+                item["prompt"], item["response"],
+                temperature=args.temperature,
+                debug=debug,
+            )
+        else:
+            raw = label_sample(
+                model, processor, image_path,
+                item["prompt"], item["response"],
+                temperature=args.temperature,
+                debug=debug,
+                fewshot_data=fewshot_data or None,
+            )
         debug_count += 1
         parsed = parse_output(raw)
         if parsed is not None:
