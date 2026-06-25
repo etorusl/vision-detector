@@ -8,47 +8,15 @@ from tqdm import tqdm
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
-FEWSHOT_IDS = {"train-en-412", "train-en-415", "train-en-416"}
-
-SYSTEM_PROMPT = (
-    "You are an expert at detecting hallucinations in vision-language model responses. "
-    "Given an image, a user prompt about the image, and a model's response, you must "
-    "output a JSON array of character-level hallucination spans. Each span has "
-    '"start" (0-based inclusive index), "end" (0-based exclusive index), and '
-    '"label" (one of: "mischaracterization", "miscounting", "invention"). '
-    "If there are no hallucinations, output an empty array []. "
-    "Output ONLY the JSON array, nothing else. Do not wrap in markdown code blocks."
+LABELING_PROMPT = (
+    "Look at the image. A user asked a question about it and a model produced an answer. "
+    "Your task: check if the answer contains hallucinations (factual errors, miscounting, "
+    "or invented details inconsistent with what's visible in the image).\n\n"
+    "Output a JSON array of hallucination spans. Each span: "
+    '{"start": int, "end": int, "label": "mischaracterization"|"miscounting"|"invention"}. '
+    "Indices are 0-based, end is exclusive. If no hallucinations, output [].\n"
+    "Output ONLY the JSON array, nothing else."
 )
-
-
-def load_fewshot_examples(data_path, exclude_ids=None):
-    if exclude_ids is None:
-        exclude_ids = set()
-    examples = []
-    with open(data_path, "r", encoding="utf-8") as f:
-        for line in f:
-            item = json.loads(line.strip())
-            if item["id"] in FEWSHOT_IDS and item["id"] not in exclude_ids:
-                examples.append(item)
-    return examples
-
-
-def build_fewshot_prompt(examples):
-    parts = [SYSTEM_PROMPT, "", "Here are labeled examples:"]
-    for i, ex in enumerate(examples, 1):
-        parts.append(f"\nExample {i}:")
-        parts.append(f'Prompt: "{ex["prompt"]}"')
-        parts.append(f'Response: "{ex["response"]}"')
-        clean_labels = [
-            {"start": lb["start"], "end": lb["end"], "label": lb["label"]}
-            for lb in ex["labels"]
-        ]
-        parts.append(f"Labels: {json.dumps(clean_labels)}")
-    parts.append(
-        "\nNow analyze the image below and the given prompt/response. "
-        "Output ONLY the JSON array of hallucination spans (or [] if none)."
-    )
-    return "\n".join(parts)
 
 
 def load_model_and_processor(model_id):
@@ -63,7 +31,7 @@ def load_model_and_processor(model_id):
     return model, processor
 
 
-def label_sample(model, processor, image_path, prompt, response, fewshot_prompt):
+def label_sample(model, processor, image_path, prompt, response, debug=False):
     image = Image.open(image_path).convert("RGB")
 
     user_content = [
@@ -71,9 +39,9 @@ def label_sample(model, processor, image_path, prompt, response, fewshot_prompt)
         {
             "type": "text",
             "text": (
-                f"{fewshot_prompt}\n\n"
-                f'Prompt: "{prompt}"\n'
-                f'Response: "{response}"\n'
+                f"{LABELING_PROMPT}\n\n"
+                f'Question: "{prompt}"\n'
+                f'Answer: "{response}"\n'
                 "Output:"
             ),
         },
@@ -89,8 +57,6 @@ def label_sample(model, processor, image_path, prompt, response, fewshot_prompt)
     ).to(model.device)
 
     prompt_tokens = inputs.input_ids.shape[-1]
-    print(f"[DEBUG] prompt tokens: {prompt_tokens}, template chars: {len(template_text)}",
-          flush=True)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -102,7 +68,10 @@ def label_sample(model, processor, image_path, prompt, response, fewshot_prompt)
         )
 
     gen_tokens = outputs.shape[-1] - prompt_tokens
-    print(f"[DEBUG] generated tokens: {gen_tokens}", flush=True)
+
+    if debug:
+        print(f"[DEBUG] prompt={prompt_tokens}, chars={len(template_text)}, gen={gen_tokens}",
+              flush=True)
 
     generated_tokens = outputs[0][prompt_tokens:]
     raw_output = processor.decode(generated_tokens, skip_special_tokens=True).strip()
@@ -134,8 +103,6 @@ def main():
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
-    fewshot_examples = load_fewshot_examples(args.input)
-    fewshot_prompt = build_fewshot_prompt(fewshot_examples)
 
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -144,13 +111,10 @@ def main():
         lines = lines[: args.max_samples]
 
     results = []
-    exclude_ids = {ex["id"] for ex in fewshot_examples}
+    debug_count = 0
 
     for line in tqdm(lines, desc="Labeling"):
         item = json.loads(line.strip())
-
-        if item["id"] in exclude_ids:
-            continue
 
         raw_path = os.path.join(args.image_dir, item["image_name"])
         image_path = os.path.realpath(raw_path)
@@ -168,10 +132,13 @@ def main():
             results.append(item)
             continue
 
+        debug = debug_count < 3
         raw = label_sample(
             model, processor, image_path,
-            item["prompt"], item["response"], fewshot_prompt,
+            item["prompt"], item["response"],
+            debug=debug,
         )
+        debug_count += 1
         parsed = parse_output(raw)
 
         item["pred_labels"] = parsed
