@@ -52,21 +52,27 @@ def load_model_and_processor(model_id):
     return model, processor
 
 
-def label_sample(model, processor, image_path, prompt, response, debug=False):
+def label_sample(model, processor, image_path, prompt, response, debug=False, image_only=False):
     image = Image.open(image_path).convert("RGB")
 
-    user_content = [
-        {"type": "image"},
-        {
-            "type": "text",
-            "text": (
-                f"{LABELING_PROMPT}\n\n"
-                f'Question: "{prompt}"\n'
-                f'Answer: "{response}"\n'
-                "Output:"
-            ),
-        },
-    ]
+    if image_only:
+        user_content = [
+            {"type": "image"},
+            {"type": "text", "text": "Describe what you see in this image in 2-3 sentences. Be specific."},
+        ]
+    else:
+        user_content = [
+            {"type": "image"},
+            {
+                "type": "text",
+                "text": (
+                    f"{LABELING_PROMPT}\n\n"
+                    f'Question: "{prompt}"\n'
+                    f'Answer: "{response}"\n'
+                    "Output:"
+                ),
+            },
+        ]
 
     messages = [{"role": "user", "content": user_content}]
 
@@ -121,12 +127,34 @@ def main():
     parser.add_argument("--output", required=True, help="Path to output JSONL file")
     parser.add_argument("--model_id", default="google/gemma-4-E2B-it")
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--debug_images", type=int, default=0,
+                        help="Describe first N images to verify vision works, then exit")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
 
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
+
+    if args.debug_images > 0:
+        print(f"\n=== VISION DEBUG: describing first {args.debug_images} images ===\n", flush=True)
+        for i in range(min(args.debug_images, len(lines))):
+            item = json.loads(lines[i].strip())
+            img_path = os.path.join(args.image_dir, item["image_name"])
+            img_path = os.path.realpath(img_path)
+            if not os.path.exists(img_path):
+                print(f"[{i}] {item['image_name']} — NOT FOUND", flush=True)
+                continue
+            desc = label_sample(model, processor, img_path, "", "",
+                                debug=True, image_only=True)
+            print(f"[{i}] {item['image_name']}", flush=True)
+            print(f"    Prompt: {item['prompt']}", flush=True)
+            print(f"    Model sees: {desc[:300]}", flush=True)
+            print(flush=True)
+        print("=== VISION DEBUG DONE ===\n", flush=True)
+        print("If descriptions are reasonable → vision works, problem is in labeling prompt.")
+        print("If descriptions are garbage → vision input is broken.\n")
+        return
 
     if args.max_samples:
         lines = lines[: args.max_samples]
@@ -180,6 +208,9 @@ def main():
             iou = char_iou(gold, parsed, rlen)
             iou_total += iou
             iou_count += 1
+            if iou_count <= 3:
+                print(f"[IoU DEBUG #{iou_count}] id={item['id']} gold={gold} pred={parsed} iou={iou:.4f}",
+                      flush=True)
 
         results.append(item)
 
