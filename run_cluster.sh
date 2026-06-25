@@ -5,6 +5,7 @@
 set -eu
 
 MAX_SAMPLES="${1:-}"
+TEMPERATURE="${2:-0.5}"
 INPUT_JSONL="shroom-vision.train.en.labeled.jsonl"
 IMAGE_DIR="/userspace/srm/shroom-vis-images"
 OUTPUT_PRED="preds_gemma.jsonl"
@@ -24,7 +25,7 @@ eval "$(/userspace/srm/miniconda3/bin/conda shell.bash hook)"
 conda activate ragognizer
 
 echo "=== Step 1: Labeling with Gemma 4 E2B ==="
-ARGS=(--input "$INPUT_JSONL" --image_dir "$IMAGE_DIR" --output "$OUTPUT_PRED")
+ARGS=(--input "$INPUT_JSONL" --image_dir "$IMAGE_DIR" --output "$OUTPUT_PRED" --temperature "$TEMPERATURE")
 if [ -n "$MAX_SAMPLES" ]; then
     ARGS+=(--max_samples "$MAX_SAMPLES")
 fi

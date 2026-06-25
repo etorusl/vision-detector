@@ -53,7 +53,8 @@ def load_model_and_processor(model_id):
     return model, processor
 
 
-def label_sample(model, processor, image_path, prompt, response, debug=False, image_only=False):
+def label_sample(model, processor, image_path, prompt, response, temperature=0.5,
+                 debug=False, image_only=False):
     image = Image.open(image_path).convert("RGB")
 
     if image_only:
@@ -90,7 +91,7 @@ def label_sample(model, processor, image_path, prompt, response, debug=False, im
         outputs = model.generate(
             **inputs,
             max_new_tokens=1024,
-            temperature=1.0,
+            temperature=temperature,
             top_p=0.95,
             top_k=64,
         )
@@ -145,6 +146,8 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--debug_images", type=int, default=0,
                         help="Describe first N images to verify vision works, then exit")
+    parser.add_argument("--temperature", type=float, default=0.5,
+                        help="Generation temperature (default: 0.5)")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
@@ -206,6 +209,7 @@ def main():
         raw = label_sample(
             model, processor, image_path,
             item["prompt"], item["response"],
+            temperature=args.temperature,
             debug=debug,
         )
         debug_count += 1
