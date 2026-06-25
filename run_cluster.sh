@@ -1,11 +1,13 @@
 #!/bin/bash
-# Cluster run script for Gemma 4 E2B hallucination labeling
-# Usage: bash run_cluster.sh [max_samples]
+# Cluster run script for Gemma 4 hallucination labeling
+# Usage: bash run_cluster.sh [max_samples] [temperature] [model_id]
+# Defaults: all samples, temp=0.5, model=google/gemma-4-E2B-it
 
 set -eu
 
 MAX_SAMPLES="${1:-}"
 TEMPERATURE="${2:-0.5}"
+MODEL_ID="${3:-google/gemma-4-E2B-it}"
 INPUT_JSONL="shroom-vision.train.en.labeled.jsonl"
 IMAGE_DIR="/userspace/srm/shroom-vis-images"
 OUTPUT_PRED="preds_gemma.jsonl"
@@ -24,8 +26,8 @@ export XDG_CACHE_HOME=/userspace/srm/.xdg-cache
 eval "$(/userspace/srm/miniconda3/bin/conda shell.bash hook)"
 conda activate ragognizer
 
-echo "=== Step 1: Labeling with Gemma 4 E2B ==="
-ARGS=(--input "$INPUT_JSONL" --image_dir "$IMAGE_DIR" --output "$OUTPUT_PRED" --temperature "$TEMPERATURE")
+echo "=== Step 1: Labeling with $MODEL_ID ==="
+ARGS=(--input "$INPUT_JSONL" --image_dir "$IMAGE_DIR" --output "$OUTPUT_PRED" --temperature "$TEMPERATURE" --model_id "$MODEL_ID")
 if [ -n "$MAX_SAMPLES" ]; then
     ARGS+=(--max_samples "$MAX_SAMPLES")
 fi
