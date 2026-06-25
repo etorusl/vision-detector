@@ -1,11 +1,32 @@
 import json
 import os
 import argparse
+import sys
 
 import torch
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoModelForImageTextToText, AutoProcessor
+
+
+def char_iou(gold_spans, pred_spans, response_len):
+    def to_set(spans):
+        s = set()
+        for sp in spans:
+            a = max(0, min(sp["start"], response_len))
+            b = max(0, min(sp["end"], response_len))
+            for i in range(a, b):
+                s.add(i)
+        return s
+    g = to_set(gold_spans)
+    p = to_set(pred_spans)
+    if not g and not p:
+        return 1.0
+    if not g or not p:
+        return 0.0
+    inter = g & p
+    union = g | p
+    return len(inter) / len(union) if union else 0.0
 
 
 LABELING_PROMPT = (
@@ -112,8 +133,13 @@ def main():
 
     results = []
     debug_count = 0
+    iou_total = 0.0
+    iou_count = 0
+    parse_errors = 0
+    empty_preds = 0
+    report_every = 20
 
-    for line in tqdm(lines, desc="Labeling"):
+    for idx, line in enumerate(tqdm(lines, desc="Labeling")):
         item = json.loads(line.strip())
 
         raw_path = os.path.join(args.image_dir, item["image_name"])
@@ -145,7 +171,32 @@ def main():
         item["raw_output"] = raw
         if parsed is None:
             item["parse_error"] = True
+            parse_errors += 1
+        else:
+            if len(parsed) == 0:
+                empty_preds += 1
+            gold = item.get("labels", [])
+            rlen = len(item.get("response", ""))
+            iou = char_iou(gold, parsed, rlen)
+            iou_total += iou
+            iou_count += 1
+
         results.append(item)
+
+        if (idx + 1) % report_every == 0 and iou_count > 0:
+            avg = iou_total / iou_count
+            print(f"\n[RUNNING {idx+1:5d}] Char-IoU={avg:.4f}  "
+                  f"parse_err={parse_errors}  empty={empty_preds}  "
+                  f"valid={iou_count}",
+                  flush=True)
+
+    result = (
+        f"\n=== FINAL ===\n"
+        f"Total IoU: {iou_total/iou_count:.4f} ({iou_count} samples)\n"
+        f"Parse errors: {parse_errors}\n"
+        f"Empty predictions ([]): {empty_preds}\n"
+    )
+    print(result, flush=True)
 
     with open(args.output, "w", encoding="utf-8") as f:
         for r in results:
