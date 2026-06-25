@@ -85,44 +85,47 @@ def load_fewshot_data(data_path, image_dir):
 def label_sample(model, processor, image_path, prompt, response, temperature=0.5,
                  debug=False, image_only=False, fewshot_data=None):
     image = Image.open(image_path).convert("RGB")
+    messages = []
+    all_images = []
 
     if image_only:
-        user_content = [
-            {"type": "image"},
-            {"type": "text", "text": "Describe what you see in this image in 2-3 sentences. Be specific."},
-        ]
-        all_images = [image]
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "Describe what you see in this image in 2-3 sentences. Be specific."},
+            ]
+        })
+        all_images.append(image)
     else:
-        user_content = []
-        all_images = []
-
         if fewshot_data:
             for i, fs in enumerate(fewshot_data, 1):
-                user_content.append({"type": "image"})
-                user_content.append({
-                    "type": "text",
-                    "text": (
-                        f"Example {i}:\n"
-                        f'Question: "{fs["prompt"]}"\n'
-                        f'Answer: "{fs["response"]}"\n'
-                        f'Output: {json.dumps(fs["output"])}\n'
-                    ),
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text",
+                         "text": f"Example {i}:\nQuestion: \"{fs['prompt']}\"\nAnswer: \"{fs['response']}\"\nOutput:"},
+                    ]
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps(fs["output"]),
                 })
                 all_images.append(fs["image"])
 
-        user_content.append({"type": "image"})
-        user_content.append({
-            "type": "text",
-            "text": (
-                f"{LABELING_PROMPT}\n\n"
-                f'Question: "{prompt}"\n'
-                f'Answer: "{response}"\n'
-                "Output:"
-            ),
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text",
+                 "text": (f"{LABELING_PROMPT}\n\n"
+                          f'Question: "{prompt}"\n'
+                          f'Answer: "{response}"\n'
+                          "Output:")},
+            ]
         })
         all_images.append(image)
-
-    messages = [{"role": "user", "content": user_content}]
 
     template_text = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -132,14 +135,6 @@ def label_sample(model, processor, image_path, prompt, response, temperature=0.5
     ).to(model.device)
 
     prompt_tokens = inputs.input_ids.shape[-1]
-
-    if debug:
-        img_keys = [k for k in inputs.keys() if "pixel" in k.lower() or "image" in k.lower() or "img" in k.lower()]
-        pixel_shapes = {k: tuple(inputs[k].shape) for k in img_keys}
-        has_imgs = "<image>" in template_text.lower()
-        print(f"[DEBUG] prompt={prompt_tokens}, gen=?, images={len(all_images)}, "
-              f"pixel_tensors={pixel_shapes}, template_has_<image>={has_imgs}",
-              flush=True)
 
     with torch.no_grad():
         outputs = model.generate(
