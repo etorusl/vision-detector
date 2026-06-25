@@ -7,6 +7,8 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
+torch.backends.cudnn.enabled = False
+
 
 LABELING_PROMPT = (
     "Look at the image. A user asked a question about it and a model produced the answer below. "
@@ -76,7 +78,7 @@ def load_model_and_processor(model_id):
         model_id,
         device_map="auto",
         dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation="eager",
         trust_remote_code=True,
     )
     print(f"[MODEL] {model_id}  config.model_type={model.config.model_type}", flush=True)
