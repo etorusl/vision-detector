@@ -33,9 +33,10 @@ LABELING_PROMPT = (
     "Look at the image. A user asked a question about it and a model produced an answer. "
     "Your task: check if the answer contains hallucinations (factual errors, miscounting, "
     "or invented details inconsistent with what's visible in the image).\n\n"
-    "Output a JSON array of hallucination spans. Each span: "
-    '{"start": int, "end": int, "label": "mischaracterization"|"miscounting"|"invention"}. '
-    "Indices are 0-based, end is exclusive. If no hallucinations, output [].\n"
+    "Output a JSON array of hallucinated phrases. Each entry: "
+    '{"phrase": "exact quoted substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
+    "Quote the phrase EXACTLY as it appears in the answer (copy-paste characters). "
+    "If no hallucinations, output [].\n"
     "Output ONLY the JSON array, nothing else."
 )
 
@@ -120,6 +121,21 @@ def parse_output(raw_output):
     return None
 
 
+def phrases_to_spans(phrases, response_text):
+    spans = []
+    for entry in phrases:
+        if not isinstance(entry, dict):
+            continue
+        phrase = entry.get("phrase", "")
+        label = entry.get("label", "unknown")
+        idx = response_text.find(phrase)
+        if idx == -1:
+            continue
+        spans.append({"start": idx, "end": idx + len(phrase), "label": label})
+    spans.sort(key=lambda s: s["start"])
+    return spans
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input JSONL file")
@@ -194,6 +210,8 @@ def main():
         )
         debug_count += 1
         parsed = parse_output(raw)
+        if parsed is not None:
+            parsed = phrases_to_spans(parsed, item.get("response", ""))
 
         item["pred_labels"] = parsed
         item["raw_output"] = raw
