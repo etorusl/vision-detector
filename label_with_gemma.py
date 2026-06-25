@@ -1,12 +1,23 @@
 import json
 import os
 import argparse
-import sys
 
 import torch
 from PIL import Image
 from tqdm import tqdm
 from transformers import AutoModelForImageTextToText, AutoProcessor
+
+
+LABELING_PROMPT = (
+    "Look at the image. A user asked a question about it and a model produced the answer below. "
+    "Your task: check if the answer contains hallucinations (factual errors, miscounting, "
+    "or invented details inconsistent with what's visible in the image).\n\n"
+    "Output a JSON array of hallucinated phrases found in the answer. "
+    'Each entry: {"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
+    "Quote the phrase EXACTLY as it appears — copy-paste characters. "
+    "If the answer is fully correct, output [].\n"
+    "Output ONLY the JSON array, nothing else."
+)
 
 
 def char_iou(gold_spans, pred_spans, response_len):
@@ -27,211 +38,6 @@ def char_iou(gold_spans, pred_spans, response_len):
     inter = g & p
     union = g | p
     return len(inter) / len(union) if union else 0.0
-
-
-LABELING_PROMPT = (
-    "Look at the image. A user asked a question about it and a model produced the answer below. "
-    "Your task: check if the answer contains hallucinations (factual errors, miscounting, "
-    "or invented details inconsistent with what's visible in the image).\n\n"
-    "Output a JSON array of hallucinated phrases found in the answer. "
-    'Each entry: {"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
-    "Quote the phrase EXACTLY as it appears — copy-paste characters. "
-    "If the answer is fully correct, output [].\n"
-    "Output ONLY the JSON array, nothing else."
-)
-
-DESCRIBE_PROMPT = (
-    "Describe this image in detail. Be specific about objects, colors, counts, "
-    "positions, textures, text, and any unusual features. "
-    "Write 3-5 sentences covering everything visible that might be relevant "
-    "to answering questions about this image."
-)
-
-TEXT_LABELING_PROMPT = (
-    "Below is a detailed description of an image, a question someone asked about it, "
-    "and an answer a model gave. Your task: check if the answer contains hallucinations "
-    "(factual errors, miscounting, or invented details) that contradict the image description.\n\n"
-    "Output a JSON array of hallucinated phrases from the ANSWER. "
-    'Each entry: {{"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}}. '
-    "Quote the phrase EXACTLY. If the answer is fully correct, output [].\n"
-    "Output ONLY the JSON array, nothing else."
-)
-
-FEWSHOT_IDS = ["train-en-412", "train-en-415"]
-
-
-def load_model_and_processor(model_id):
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, padding_side="left")
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        device_map="auto",
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        trust_remote_code=True,
-    )
-    print(f"[MODEL] {model_id}  config.model_type={model.config.model_type}", flush=True)
-    return model, processor
-
-
-def load_fewshot_data(data_path, image_dir):
-    with open(data_path, "r", encoding="utf-8") as f:
-        all_items = {item["id"]: item for line in f
-                     if (item := json.loads(line.strip()))["id"] in FEWSHOT_IDS}
-    fewshot = []
-    for fid in FEWSHOT_IDS:
-        item = all_items[fid]
-        img_path = os.path.join(image_dir, item["image_name"])
-        if not os.path.exists(img_path):
-            print(f"WARNING: few-shot image not found: {img_path}", flush=True)
-            continue
-        img = Image.open(img_path).convert("RGB")
-        rtext = item["response"]
-        phrases = []
-        for lb in item.get("labels", []):
-            phrase = rtext[lb["start"]:lb["end"]]
-            phrases.append({"phrase": phrase, "label": lb["label"]})
-        fewshot.append({
-            "image": img,
-            "prompt": item["prompt"],
-            "response": rtext,
-            "output": phrases,
-        })
-    return fewshot
-
-
-def describe_image(model, processor, image_path):
-    image = Image.open(image_path).convert("RGB")
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image"},
-            {"type": "text", "text": DESCRIBE_PROMPT},
-        ]
-    }]
-    return _generate(model, processor, messages, [image], debug=False)
-
-
-def label_from_description(model, processor, description, question, answer,
-                           temperature=0.5, debug=False):
-    text_content = (
-        f'{TEXT_LABELING_PROMPT}\n\n'
-        f'Image description: """{description}"""\n\n'
-        f'Question: "{question}"\n'
-        f'Answer: "{answer}"\n'
-        f'Output:'
-    )
-    messages = [{"role": "user", "content": text_content}]
-    return _generate(model, processor, messages, [], temperature=temperature, debug=debug)
-
-
-def _generate(model, processor, messages, images, temperature=0.5, debug=False):
-    template_text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    if images:
-        inputs = processor(
-            text=template_text, images=images, return_tensors="pt"
-        ).to(model.device)
-    else:
-        inputs = processor(
-            text=template_text, return_tensors="pt"
-        ).to(model.device)
-
-    prompt_tokens = inputs.input_ids.shape[-1]
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=1024,
-            temperature=temperature,
-            top_p=0.95,
-            top_k=64,
-        )
-
-    gen_tokens = outputs.shape[-1] - prompt_tokens
-    if debug:
-        print(f"[DEBUG] prompt={prompt_tokens}, gen={gen_tokens}", flush=True)
-
-    generated_tokens = outputs[0][prompt_tokens:]
-    return processor.decode(generated_tokens, skip_special_tokens=True).strip()
-
-
-def label_sample(model, processor, image_path, prompt, response, temperature=0.5,
-                 debug=False, image_only=False, fewshot_data=None):
-    image = Image.open(image_path).convert("RGB")
-    messages = []
-    all_images = []
-
-    if image_only:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": "Describe what you see in this image in 2-3 sentences. Be specific."},
-            ]
-        })
-        all_images.append(image)
-    else:
-        if fewshot_data:
-            for i, fs in enumerate(fewshot_data, 1):
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text",
-                         "text": f"Example {i}:\nQuestion: \"{fs['prompt']}\"\nAnswer: \"{fs['response']}\"\nOutput:"},
-                    ]
-                })
-                messages.append({
-                    "role": "assistant",
-                    "content": json.dumps(fs["output"]),
-                })
-                all_images.append(fs["image"])
-
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text",
-                 "text": (f"{LABELING_PROMPT}\n\n"
-                          f'Question: "{prompt}"\n'
-                          f'Answer: "{response}"\n'
-                          "Output:")},
-            ]
-        })
-        all_images.append(image)
-
-    template_text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(
-        text=template_text, images=all_images, return_tensors="pt"
-    ).to(model.device)
-
-    prompt_tokens = inputs.input_ids.shape[-1]
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=1024,
-            temperature=temperature,
-            top_p=0.95,
-            top_k=64,
-        )
-
-    gen_tokens = outputs.shape[-1] - prompt_tokens
-
-    if debug:
-        img_keys = [k for k in inputs.keys() if "pixel" in k.lower() or "image" in k.lower() or "img" in k.lower()]
-        pixel_shapes = {k: tuple(inputs[k].shape) for k in img_keys}
-        has_img_token = "<image>" in template_text
-        print(f"[DEBUG] prompt={prompt_tokens}, gen={gen_tokens}, imgs={len(all_images)}, "
-              f"pixels={pixel_shapes}, has_<image>={has_img_token}",
-              flush=True)
-
-    generated_tokens = outputs[0][prompt_tokens:]
-    raw_output = processor.decode(generated_tokens, skip_special_tokens=True).strip()
-    return raw_output
 
 
 def parse_output(raw_output):
@@ -264,6 +70,60 @@ def phrases_to_spans(phrases, response_text):
     return spans
 
 
+def load_model_and_processor(model_id):
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_id,
+        device_map="auto",
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+        trust_remote_code=True,
+    )
+    print(f"[MODEL] {model_id}  config.model_type={model.config.model_type}", flush=True)
+    return model, processor
+
+
+def label_one(model, processor, image_path, prompt, response, temperature, debug):
+    image = Image.open(image_path).convert("RGB")
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text",
+             "text": (f"{LABELING_PROMPT}\n\n"
+                      f'Question: "{prompt}"\n'
+                      f'Answer: "{response}"\n'
+                      "Output:")},
+        ]
+    }]
+
+    template = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = processor(
+        text=template, images=image, return_tensors="pt"
+    ).to(model.device)
+
+    prompt_tokens = inputs.input_ids.shape[-1]
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=temperature,
+            top_p=0.95,
+            top_k=64,
+        )
+
+    gen_tokens = outputs.shape[-1] - prompt_tokens
+    if debug:
+        print(f"[DEBUG] prompt={prompt_tokens} gen={gen_tokens}", flush=True)
+
+    generated_tokens = outputs[0][prompt_tokens:]
+    return processor.decode(generated_tokens, skip_special_tokens=True).strip()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input JSONL file")
@@ -271,14 +131,7 @@ def main():
     parser.add_argument("--output", required=True, help="Path to output JSONL file")
     parser.add_argument("--model_id", default="google/gemma-4-E2B-it")
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--debug_images", type=int, default=0,
-                        help="Describe first N images to verify vision works, then exit")
-    parser.add_argument("--temperature", type=float, default=0.5,
-                        help="Generation temperature (default: 0.5)")
-    parser.add_argument("--no_fewshot", action="store_true",
-                        help="Disable few-shot, single image only")
-    parser.add_argument("--two_stage", action="store_true",
-                        help="Two-stage: describe image first, then text-only labeling")
+    parser.add_argument("--temperature", type=float, default=0.5)
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
@@ -286,58 +139,27 @@ def main():
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    if args.no_fewshot:
-        fewshot_data = []
-        print("Few-shot disabled", flush=True)
-    else:
-        fewshot_data = load_fewshot_data(args.input, args.image_dir)
-        print(f"Loaded {len(fewshot_data)} few-shot examples", flush=True)
-
-    if args.debug_images > 0:
-        print(f"\n=== VISION DEBUG: describing first {args.debug_images} images ===\n", flush=True)
-        for i in range(min(args.debug_images, len(lines))):
-            item = json.loads(lines[i].strip())
-            img_path = os.path.join(args.image_dir, item["image_name"])
-            img_path = os.path.realpath(img_path)
-            if not os.path.exists(img_path):
-                print(f"[{i}] {item['image_name']} — NOT FOUND", flush=True)
-                continue
-            desc = label_sample(model, processor, img_path, "", "",
-                                debug=True, image_only=True)
-            print(f"[{i}] {item['image_name']}", flush=True)
-            print(f"    Prompt: {item['prompt']}", flush=True)
-            print(f"    Model sees: {desc[:300]}", flush=True)
-            print(flush=True)
-        print("=== VISION DEBUG DONE ===\n", flush=True)
-        print("If descriptions are reasonable → vision works, problem is in labeling prompt.")
-        print("If descriptions are garbage → vision input is broken.\n")
-        return
-
     if args.max_samples:
-        lines = lines[: args.max_samples]
+        lines = lines[:args.max_samples]
 
     results = []
-    fewshot_ids = set(FEWSHOT_IDS) if not args.no_fewshot else set()
-    debug_count = 0
     iou_total = 0.0
     iou_count = 0
     parse_errors = 0
     empty_preds = 0
     report_every = 20
 
+    image_dir_real = os.path.realpath(args.image_dir) + os.sep
+
     for idx, line in enumerate(tqdm(lines, desc="Labeling")):
         item = json.loads(line.strip())
 
-        if item["id"] in fewshot_ids:
-            continue
-
         raw_path = os.path.join(args.image_dir, item["image_name"])
         image_path = os.path.realpath(raw_path)
-        image_dir_real = os.path.realpath(args.image_dir) + os.sep
 
         if not image_path.startswith(image_dir_real):
             item["pred_labels"] = None
-            item["error"] = f"Path traversal rejected: {item['image_name']}"
+            item["error"] = f"Path traversal: {item['image_name']}"
             results.append(item)
             continue
 
@@ -347,32 +169,19 @@ def main():
             results.append(item)
             continue
 
-        debug = debug_count < 3
-        if args.two_stage:
-            description = describe_image(model, processor, image_path)
-            if debug:
-                print(f"[DESC] {description[:200]}...", flush=True)
-            raw = label_from_description(
-                model, processor, description,
-                item["prompt"], item["response"],
-                temperature=args.temperature,
-                debug=debug,
-            )
-        else:
-            raw = label_sample(
-                model, processor, image_path,
-                item["prompt"], item["response"],
-                temperature=args.temperature,
-                debug=debug,
-                fewshot_data=fewshot_data or None,
-            )
-        debug_count += 1
+        debug = idx < 3
+        raw = label_one(
+            model, processor, image_path,
+            item["prompt"], item["response"],
+            args.temperature, debug,
+        )
         parsed = parse_output(raw)
         if parsed is not None:
             parsed = phrases_to_spans(parsed, item.get("response", ""))
 
         item["pred_labels"] = parsed
         item["raw_output"] = raw
+
         if parsed is None:
             item["parse_error"] = True
             parse_errors += 1
@@ -385,7 +194,7 @@ def main():
             iou_total += iou
             iou_count += 1
             if iou_count <= 3:
-                print(f"[IoU DEBUG #{iou_count}] id={item['id']} gold={gold} pred={parsed} iou={iou:.4f}",
+                print(f"[IoU #{iou_count}] {item['id']} gold={gold} pred={parsed} iou={iou:.4f}",
                       flush=True)
 
         results.append(item)
@@ -393,17 +202,14 @@ def main():
         if (idx + 1) % report_every == 0 and iou_count > 0:
             avg = iou_total / iou_count
             print(f"\n[RUNNING {idx+1:5d}] Char-IoU={avg:.4f}  "
-                  f"parse_err={parse_errors}  empty={empty_preds}  "
-                  f"valid={iou_count}",
+                  f"parse_err={parse_errors}  empty={empty_preds}  valid={iou_count}",
                   flush=True)
 
-    result = (
-        f"\n=== FINAL ===\n"
-        f"Total IoU: {iou_total/iou_count:.4f} ({iou_count} samples)\n"
-        f"Parse errors: {parse_errors}\n"
-        f"Empty predictions ([]): {empty_preds}\n"
-    )
-    print(result, flush=True)
+    if iou_count > 0:
+        print(f"\n=== FINAL ===\n"
+              f"IoU: {iou_total/iou_count:.4f} ({iou_count} samples)\n"
+              f"Parse errors: {parse_errors}\n"
+              f"Empty: {empty_preds}\n", flush=True)
 
     with open(args.output, "w", encoding="utf-8") as f:
         for r in results:

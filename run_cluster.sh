@@ -7,7 +7,7 @@ set -eu
 
 MAX_SAMPLES="${1:-}"
 TEMPERATURE="${2:-0.5}"
-MODEL_ID="${3:-google/gemma-4-E2B-it}"
+MODEL_ID="${3:-Qwen/Qwen2-VL-2B-Instruct}"
 INPUT_JSONL="shroom-vision.train.en.labeled.jsonl"
 IMAGE_DIR="/userspace/srm/shroom-vis-images"
 OUTPUT_PRED="preds_gemma.jsonl"
