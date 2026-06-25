@@ -2,11 +2,11 @@
 # Cluster run script for Gemma 4 E2B hallucination labeling
 # Usage: bash run_cluster.sh [max_samples]
 
-set -euo pipefail
+set -eu
 
 MAX_SAMPLES="${1:-}"
 INPUT_JSONL="shroom-vision.train.en.labeled.jsonl"
-IMAGE_DIR="/userspace/srm/shroom_images"
+IMAGE_DIR="/userspace/srm/shroom-vis-images"
 OUTPUT_PRED="preds_gemma.jsonl"
 OUTPUT_EVAL="eval_results.txt"
 
