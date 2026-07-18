@@ -85,27 +85,29 @@ def load_model_and_processor(model_id):
     return model, processor
 
 
-def label_one(model, processor, image_path, prompt, response, temperature, debug):
-    image = Image.open(image_path).convert("RGB")
+INSPECT_PROMPT = (
+    "Look at this image. Below is a question someone asked about it, and an answer "
+    "a model gave. Your task: point out any factual errors, miscounts, contradictions, "
+    "or invented details in the answer that don't match what you see in the image.\n"
+    "Be specific — quote the problematic part of the answer. "
+    "If the answer is fully correct, say so."
+)
 
+
+def generate_response(model, processor, image, text, temperature=0.5, max_pixels=512*512):
     messages = [{
         "role": "user",
         "content": [
             {"type": "image"},
-            {"type": "text",
-             "text": (f"{LABELING_PROMPT}\n\n"
-                      f'Question: "{prompt}"\n'
-                      f'Answer: "{response}"\n'
-                      "Output:")},
+            {"type": "text", "text": text},
         ]
     }]
-
     template = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = processor(
         text=template, images=image, return_tensors="pt",
-        max_pixels=512 * 512,
+        max_pixels=max_pixels,
     ).to(model.device)
 
     prompt_tokens = inputs.input_ids.shape[-1]
@@ -120,11 +122,21 @@ def label_one(model, processor, image_path, prompt, response, temperature, debug
         )
 
     gen_tokens = outputs.shape[-1] - prompt_tokens
-    if debug:
-        print(f"[DEBUG] prompt={prompt_tokens} gen={gen_tokens}", flush=True)
+    generated = outputs[0][prompt_tokens:]
+    return processor.decode(generated, skip_special_tokens=True).strip()
 
-    generated_tokens = outputs[0][prompt_tokens:]
-    return processor.decode(generated_tokens, skip_special_tokens=True).strip()
+
+def label_one(model, processor, image_path, prompt, response, temperature, debug):
+    image = Image.open(image_path).convert("RGB")
+    text = (f"{LABELING_PROMPT}\n\n"
+            f'Question: "{prompt}"\n'
+            f'Answer: "{response}"\n'
+            "Output:")
+    raw = generate_response(model, processor, image, text, temperature,
+                            max_pixels=512*512)
+    if debug:
+        print(f"[DEBUG] len(raw)={len(raw)}", flush=True)
+    return raw
 
 
 def main():
@@ -135,12 +147,46 @@ def main():
     parser.add_argument("--model_id", default="google/gemma-4-E2B-it")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=0.5)
+    parser.add_argument("--inspect", action="store_true",
+                        help="Inspect mode: free-form QA, print all responses for manual review")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
 
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
+
+    if args.inspect:
+        print(f"\n{'='*80}\nINSPECT MODE — free-form hallucination analysis\n{'='*80}\n",
+              flush=True)
+        for idx, line in enumerate(lines):
+            if args.max_samples and idx >= args.max_samples:
+                break
+            item = json.loads(line.strip())
+            img_path = os.path.join(args.image_dir, item["image_name"])
+            img_path = os.path.realpath(img_path)
+            if not os.path.exists(img_path):
+                continue
+
+            image = Image.open(img_path).convert("RGB")
+            text = (f'{INSPECT_PROMPT}\n\n'
+                    f'Question: "{item["prompt"]}"\n'
+                    f'Answer: "{item["response"]}"\n\n'
+                    f'Your analysis:')
+
+            analysis = generate_response(model, processor, image, text, args.temperature)
+
+            print(f"[{idx+1}] {item['image_name']}")
+            print(f"    ID: {item['id']}")
+            print(f"    Gold labels: {item['labels']}")
+            print(f"    Question: {item['prompt']}")
+            print(f"    Answer: {item['response'][:200]}{'...' if len(item['response'])>200 else ''}")
+            print(f"    Model says:\n    {analysis}")
+            print(f"    {'-'*70}")
+            print(flush=True)
+
+        print(f"\n{'='*80}\nINSPECT DONE\n{'='*80}\n", flush=True)
+        return
 
     if args.max_samples:
         lines = lines[:args.max_samples]
