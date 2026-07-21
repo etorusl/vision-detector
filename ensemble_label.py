@@ -150,6 +150,9 @@ def ensemble_label(model, processor, image, question, answer, temperature, k=3):
         consensus_parts.append(f"Analysis {i}: {a}")
     consensus_text = CONSENSUS_PROMPT.format(k=k, answer=answer) + "\n".join(consensus_parts) + "\n\nConsensus:"
 
+    if len(analyses) > 0 and analyses[0] is not None:
+        print(f"[STAGE1] {len(analyses)} analyses done, lengths: {[len(a) for a in analyses]}", flush=True)
+
     consensus, _, _ = generate(
         model, processor,
         [text_msg(consensus_text)],
@@ -221,15 +224,18 @@ def main():
         item["raw_labels"] = raw
 
         if pred is None:
+            item["iou"] = None
             parse_errors += 1
         else:
             if len(pred) == 0:
                 empty_preds += 1
-            iou = char_iou(item.get("labels", []), pred, len(item.get("response", "")))
+            item["gold_labels"] = item.get("labels", [])
+            iou = char_iou(item["gold_labels"], pred, len(item.get("response", "")))
+            item["iou"] = iou
             iou_total += iou
             iou_count += 1
             if iou_count <= 3:
-                print(f"[IoU #{iou_count}] {item['id']} gold={item['labels']} pred={pred} iou={iou:.4f}",
+                print(f"[IoU #{iou_count}] {item['id']} gold={item['gold_labels']} pred={pred} iou={iou:.4f}",
                       flush=True)
         results.append(item)
 
@@ -249,7 +255,16 @@ def main():
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
+    eval_path = args.output + ".eval.txt"
+    with open(eval_path, "w") as f:
+        f.write(f"model={args.model_id}  K={args.ensemble}  temp={args.temperature}\n")
+        f.write(f"samples={iou_count}  avg_iou={iou_total/iou_count:.4f}  "
+                f"parse_errors={parse_errors}  empty_preds={empty_preds}\n")
+
     print(f"Saved {len(results)} results to {args.output}")
+    print(f"Eval summary: {eval_path}")
+    print(f"Avg IoU: {iou_total/iou_count:.4f}  (K={args.ensemble}, {iou_count} valid)")
+    print(f"+{'='*60}+")
 
 
 if __name__ == "__main__":
