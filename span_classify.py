@@ -1,6 +1,7 @@
 import json
 import os
 import argparse
+import re
 
 import torch
 from PIL import Image
@@ -11,6 +12,7 @@ torch.backends.cudnn.enabled = False
 
 
 def partition(text, k):
+    """Split into fixed k-char chunks (fallback)."""
     chunks = []
     spans = []
     for i in range(0, len(text), k):
@@ -20,9 +22,39 @@ def partition(text, k):
     return chunks, spans
 
 
+def sentence_partition(text, max_len=120):
+    """Split by sentences, then by commas/colons within long sentences (>max_len)."""
+    raw_sents = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    spans = []
+    for sent in raw_sents:
+        sent = sent.strip()
+        if not sent:
+            continue
+        start = text.find(sent, spans[-1][1] if spans else 0)
+        if start == -1:
+            start = spans[-1][1] if spans else 0
+        if len(sent) <= max_len:
+            chunks.append(sent)
+            spans.append((start, start + len(sent)))
+        else:
+            sub_parts = re.split(r'(?<=[,;:—–-])\s+', sent)
+            for part in sub_parts:
+                part = part.strip()
+                if not part:
+                    continue
+                pstart = text.find(part, start)
+                if pstart == -1:
+                    pstart = start
+                chunks.append(part)
+                spans.append((pstart, pstart + len(part)))
+                start = pstart + len(part)
+    return chunks, spans
+
+
 CHUNK_PROMPT = (
     "Look at this image. Below is a model's answer about this image, "
-    "split into numbered chunks of {k} characters. "
+    "split into numbered chunks. "
     "For each chunk, check if it contains any hallucination "
     "(factual error, miscount, or invented detail) that contradicts the image. "
     "Output ONLY a JSON array of chunk indices that contain hallucinations. "
@@ -52,8 +84,6 @@ def char_iou(gold_spans, pred_spans, response_len):
 
 
 def extract_json(raw_text):
-    """Try to find a JSON array in the text, even if embedded in thinking."""
-    import re
     raw_text = raw_text.strip()
     if raw_text.startswith("```"):
         lines = raw_text.split("\n")
@@ -63,7 +93,6 @@ def extract_json(raw_text):
         return json.loads(raw_text)
     except json.JSONDecodeError:
         pass
-    # try to find [...] in the text
     matches = list(re.finditer(r"\[[^\]]*\]", raw_text))
     if matches:
         for m in reversed(matches):
@@ -119,11 +148,19 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--chunk_k", type=int, default=30,
-                        help="Character chunk size for partitioning (default: 30)")
+                        help="Char chunk size when --sentences is not set (default: 30)")
+    parser.add_argument("--sentences", action="store_true",
+                        help="Split by sentences (then by commas for long ones)")
+    parser.add_argument("--sent_max_len", type=int, default=120,
+                        help="Max sentence length before further splitting (default: 120)")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
-    print(f"Chunk size: {args.chunk_k} chars", flush=True)
+
+    if args.sentences:
+        print(f"Chunk mode: sentences (max_len={args.sent_max_len})", flush=True)
+    else:
+        print(f"Chunk mode: fixed k={args.chunk_k} chars", flush=True)
 
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -147,10 +184,14 @@ def main():
 
         image = Image.open(img_path).convert("RGB")
         answer = item["response"]
-        chunks, chunk_spans = partition(answer, args.chunk_k)
+
+        if args.sentences:
+            chunks, chunk_spans = sentence_partition(answer, args.sent_max_len)
+        else:
+            chunks, chunk_spans = partition(answer, args.chunk_k)
 
         chunk_lines = "\n".join(f"[{i}] \"{c}\"" for i, c in enumerate(chunks))
-        prompt = CHUNK_PROMPT.format(k=args.chunk_k, question=item["prompt"])
+        prompt = CHUNK_PROMPT.format(question=item["prompt"])
         prompt += f"Answer chunks:\n{chunk_lines}\n\nHallucinated chunks:"
 
         raw = generate(
@@ -181,7 +222,6 @@ def main():
                             "end": chunk_spans[ci][1],
                             "label": "hallucination",
                         })
-            # merge adjacent chunks
             merged = []
             for s in sorted(pred_spans, key=lambda x: x["start"]):
                 if merged and merged[-1]["end"] >= s["start"]:
@@ -208,8 +248,9 @@ def main():
 
     if iou_count > 0:
         avg = iou_total / iou_count
+        mode = f"sentences" if args.sentences else f"k={args.chunk_k}"
         print(f"\n{'='*60}\n"
-              f"FINAL  K={args.chunk_k}  IoU={avg:.4f}  samples={iou_count}  parse_err={parse_errors}\n"
+              f"FINAL  mode={mode}  IoU={avg:.4f}  samples={iou_count}  parse_err={parse_errors}\n"
               f"{'='*60}", flush=True)
 
     with open(args.output, "w", encoding="utf-8") as f:
