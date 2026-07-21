@@ -153,14 +153,17 @@ def main():
                         help="Split by sentences (then by commas for long ones)")
     parser.add_argument("--sent_max_len", type=int, default=120,
                         help="Max sentence length before further splitting (default: 120)")
+    parser.add_argument("--no_merge", action="store_true",
+                        help="Keep each chunk as independent span, don't merge adjacent ones")
     args = parser.parse_args()
 
     model, processor = load_model_and_processor(args.model_id)
 
     if args.sentences:
-        print(f"Chunk mode: sentences (max_len={args.sent_max_len})", flush=True)
+        print(f"Chunk mode: sentences (max_len={args.sent_max_len})  merge={'no' if args.no_merge else 'yes'}",
+              flush=True)
     else:
-        print(f"Chunk mode: fixed k={args.chunk_k} chars", flush=True)
+        print(f"Chunk mode: fixed k={args.chunk_k}  merge={'no' if args.no_merge else 'yes'}", flush=True)
 
     with open(args.input, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -222,12 +225,15 @@ def main():
                             "end": chunk_spans[ci][1],
                             "label": "hallucination",
                         })
-            merged = []
-            for s in sorted(pred_spans, key=lambda x: x["start"]):
-                if merged and merged[-1]["end"] >= s["start"]:
-                    merged[-1]["end"] = max(merged[-1]["end"], s["end"])
-                else:
-                    merged.append(s)
+            if args.no_merge:
+                merged = sorted(pred_spans, key=lambda x: x["start"])
+            else:
+                merged = []
+                for s in sorted(pred_spans, key=lambda x: x["start"]):
+                    if merged and merged[-1]["end"] >= s["start"]:
+                        merged[-1]["end"] = max(merged[-1]["end"], s["end"])
+                    else:
+                        merged.append(s)
             item["pred_labels"] = merged
 
             iou = char_iou(item.get("labels", []), merged, len(answer))
