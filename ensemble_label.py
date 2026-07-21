@@ -29,7 +29,7 @@ CONSENSUS_PROMPT = (
 LABEL_PROMPT = (
     "Based on this hallucination analysis, output a JSON array of hallucinated "
     "phrases from the answer. Each entry: "
-    '{"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}. '
+    '{{"phrase": "exact substring from the answer", "label": "mischaracterization"|"miscounting"|"invention"}}. '
     "Quote the phrase EXACTLY as it appears. If no hallucinations, output [].\n"
     "Output ONLY the JSON array, nothing else.\n\n"
     "Answer: \"\"\"{answer}\"\"\"\n"
