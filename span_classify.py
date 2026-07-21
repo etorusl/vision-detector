@@ -51,16 +51,27 @@ def char_iou(gold_spans, pred_spans, response_len):
     return len(inter) / len(union) if union else 0.0
 
 
-def parse_output(raw_output):
-    raw_output = raw_output.strip()
-    if raw_output.startswith("```"):
-        lines = raw_output.split("\n")
+def extract_json(raw_text):
+    """Try to find a JSON array in the text, even if embedded in thinking."""
+    import re
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```"):
+        lines = raw_text.split("\n")
         lines = [l for l in lines if not l.startswith("```")]
-        raw_output = "\n".join(lines).strip()
+        raw_text = "\n".join(lines).strip()
     try:
-        return json.loads(raw_output)
+        return json.loads(raw_text)
     except json.JSONDecodeError:
-        return None
+        pass
+    # try to find [...] in the text
+    matches = list(re.finditer(r"\[[^\]]*\]", raw_text))
+    if matches:
+        for m in reversed(matches):
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                continue
+    return None
 
 
 def load_model_and_processor(model_id):
@@ -88,7 +99,7 @@ def generate(model, processor, messages, images=None, temperature=0.3, max_pixel
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=512,
+            max_new_tokens=2048,
             temperature=temperature,
             top_p=0.95,
             top_k=64,
@@ -150,13 +161,16 @@ def main():
             temperature=args.temperature,
         )
 
-        chunk_indices = parse_output(raw)
+        chunk_indices = extract_json(raw)
         item["raw_output"] = raw
         item["chunk_indices"] = chunk_indices
 
         if chunk_indices is None:
             item["pred_labels"] = None
+            item["iou"] = None
             parse_errors += 1
+            if parse_errors <= 3:
+                print(f"[PARSE ERR] {item['id']} raw={raw[:200]}", flush=True)
         else:
             pred_spans = []
             if isinstance(chunk_indices, list):
